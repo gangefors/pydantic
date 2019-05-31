@@ -1,23 +1,81 @@
 import os
+import sys
 import uuid
 from collections import OrderedDict
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from enum import Enum, IntEnum
 from pathlib import Path
-from typing import List, NewType, Set
+from typing import Dict, Iterator, List, NewType, Pattern, Sequence, Set, Tuple
 from uuid import UUID
 
 import pytest
 
-from pydantic import (DSN, UUID1, UUID3, UUID4, UUID5, BaseModel, ConfigError, DirectoryPath, EmailStr, FilePath, Json,
-                      NameEmail, NegativeFloat, NegativeInt, PositiveFloat, PositiveInt, PyObject, StrictStr,
-                      ValidationError, condecimal, confloat, conint, constr, create_model)
+from pydantic import (
+    DSN,
+    UUID1,
+    UUID3,
+    UUID4,
+    UUID5,
+    BaseModel,
+    ConfigError,
+    DirectoryPath,
+    EmailStr,
+    FilePath,
+    Json,
+    NameEmail,
+    NegativeFloat,
+    NegativeInt,
+    PositiveFloat,
+    PositiveInt,
+    PyObject,
+    SecretBytes,
+    SecretStr,
+    StrictStr,
+    ValidationError,
+    conbytes,
+    condecimal,
+    confloat,
+    conint,
+    constr,
+    create_model,
+)
 
 try:
     import email_validator
 except ImportError:
     email_validator = None
+
+
+class ConBytesModel(BaseModel):
+    v: conbytes(max_length=10) = b'foobar'
+
+
+def foo():
+    return 42
+
+
+def test_constrained_bytes_good():
+    m = ConBytesModel(v=b'short')
+    assert m.v == b'short'
+
+
+def test_constrained_bytes_default():
+    m = ConBytesModel()
+    assert m.v == b'foobar'
+
+
+def test_constrained_bytes_too_long():
+    with pytest.raises(ValidationError) as exc_info:
+        ConBytesModel(v=b'this is too long')
+    assert exc_info.value.errors() == [
+        {
+            'loc': ('v',),
+            'msg': 'ensure this value has at most 10 characters',
+            'type': 'value_error.any_str.max_length',
+            'ctx': {'limit_value': 10},
+        }
+    ]
 
 
 class ConStringModel(BaseModel):
@@ -42,10 +100,8 @@ def test_constrained_str_too_long():
             'loc': ('v',),
             'msg': 'ensure this value has at most 10 characters',
             'type': 'value_error.any_str.max_length',
-            'ctx': {
-                'limit_value': 10,
-            },
-        },
+            'ctx': {'limit_value': 10},
+        }
     ]
 
 
@@ -79,35 +135,70 @@ def test_dsn_no_driver():
     with pytest.raises(ValidationError) as exc_info:
         DsnModel(db_driver=None)
     assert exc_info.value.errors() == [
-        {
-            'loc': ('db_driver',),
-            'msg': 'none is not an allow value',
-            'type': 'type_error.none.not_allowed',
-        },
-        {
-            'loc': ('dsn',),
-            'msg': '"driver" field may not be empty',
-            'type': 'value_error.dsn.driver_is_empty',
-        },
+        {'loc': ('db_driver',), 'msg': 'none is not an allowed value', 'type': 'type_error.none.not_allowed'},
+        {'loc': ('dsn',), 'msg': '"driver" field may not be empty', 'type': 'value_error.dsn.driver_is_empty'},
     ]
 
 
-class PyObjectModel(BaseModel):
-    module: PyObject = 'os.path'
-
-
 def test_module_import():
+    class PyObjectModel(BaseModel):
+        module: PyObject = 'os.path'
+
     m = PyObjectModel()
     assert m.module == os.path
+
     with pytest.raises(ValidationError) as exc_info:
         PyObjectModel(module='foobar')
     assert exc_info.value.errors() == [
         {
             'loc': ('module',),
-            'msg': 'ensure this value contains valid import path',
+            'msg': 'ensure this value contains valid import path or valid callable: '
+            '"foobar" doesn\'t look like a module path',
             'type': 'type_error.pyobject',
-        },
+            'ctx': {'error_message': '"foobar" doesn\'t look like a module path'},
+        }
     ]
+
+    with pytest.raises(ValidationError) as exc_info:
+        PyObjectModel(module='os.missing')
+    assert exc_info.value.errors() == [
+        {
+            'loc': ('module',),
+            'msg': 'ensure this value contains valid import path or valid callable: '
+            'Module "os" does not define a "missing" attribute',
+            'type': 'type_error.pyobject',
+            'ctx': {'error_message': 'Module "os" does not define a "missing" attribute'},
+        }
+    ]
+
+    with pytest.raises(ValidationError) as exc_info:
+        PyObjectModel(module=[1, 2, 3])
+    assert exc_info.value.errors() == [
+        {
+            'loc': ('module',),
+            'msg': 'ensure this value contains valid import path or valid callable: '
+            'value is neither a valid import path not a valid callable',
+            'type': 'type_error.pyobject',
+            'ctx': {'error_message': 'value is neither a valid import path not a valid callable'},
+        }
+    ]
+
+
+def test_pyobject_none():
+    class PyObjectModel(BaseModel):
+        module: PyObject = None
+
+    m = PyObjectModel()
+    assert m.module is None
+
+
+def test_pyobject_callable():
+    class PyObjectModel(BaseModel):
+        foo: PyObject = foo
+
+    m = PyObjectModel()
+    assert m.foo is foo
+    assert m.foo() == 42
 
 
 class CheckModel(BaseModel):
@@ -124,71 +215,68 @@ class CheckModel(BaseModel):
         max_anystr_length = 10
 
 
-@pytest.mark.parametrize('field,value,result', [
-    ('bool_check', True, True),
-    ('bool_check', False, False),
-    ('bool_check', None, False),
-    ('bool_check', '', False),
-    ('bool_check', 1, True),
-    ('bool_check', 'TRUE', True),
-    ('bool_check', b'TRUE', True),
-    ('bool_check', 'true', True),
-    ('bool_check', '1', True),
-    ('bool_check', '2', False),
-    ('bool_check', 2, True),
-    ('bool_check', 'on', True),
-    ('bool_check', 'yes', True),
-
-    ('str_check', 's', 's'),
-    ('str_check', '  s  ', 's'),
-    ('str_check', b's', 's'),
-    ('str_check', b'  s  ', 's'),
-    ('str_check', 1, '1'),
-    ('str_check', 'x' * 11, ValidationError),
-    ('str_check', b'x' * 11, ValidationError),
-
-    ('bytes_check', 's', b's'),
-    ('bytes_check', '  s  ', b's'),
-    ('bytes_check', b's', b's'),
-    ('bytes_check', b'  s  ', b's'),
-    ('bytes_check', 1, b'1'),
-    ('bytes_check', bytearray('xx', encoding='utf8'), b'xx'),
-    ('bytes_check', True, b'True'),
-    ('bytes_check', False, b'False'),
-    ('bytes_check', {}, ValidationError),
-    ('bytes_check', 'x' * 11, ValidationError),
-    ('bytes_check', b'x' * 11, ValidationError),
-
-    ('int_check', 1, 1),
-    ('int_check', 1.9, 1),
-    ('int_check', '1', 1),
-    ('int_check', '1.9', ValidationError),
-    ('int_check', b'1', 1),
-    ('int_check', 12, 12),
-    ('int_check', '12', 12),
-    ('int_check', b'12', 12),
-
-    ('float_check', 1, 1.0),
-    ('float_check', 1.0, 1.0),
-    ('float_check', '1.0', 1.0),
-    ('float_check', '1', 1.0),
-    ('float_check', b'1.0', 1.0),
-    ('float_check', b'1', 1.0),
-
-    ('uuid_check', 'ebcdab58-6eb8-46fb-a190-d07a33e9eac8', UUID('ebcdab58-6eb8-46fb-a190-d07a33e9eac8')),
-    ('uuid_check', UUID('ebcdab58-6eb8-46fb-a190-d07a33e9eac8'), UUID('ebcdab58-6eb8-46fb-a190-d07a33e9eac8')),
-    ('uuid_check', b'ebcdab58-6eb8-46fb-a190-d07a33e9eac8', UUID('ebcdab58-6eb8-46fb-a190-d07a33e9eac8')),
-    ('uuid_check', 'ebcdab58-6eb8-46fb-a190-', ValidationError),
-    ('uuid_check', 123, ValidationError),
-
-    ('decimal_check', 42.24, Decimal('42.24')),
-    ('decimal_check', '42.24', Decimal('42.24')),
-    ('decimal_check', b'42.24', Decimal('42.24')),
-    ('decimal_check', '  42.24  ', Decimal('42.24')),
-    ('decimal_check', Decimal('42.24'), Decimal('42.24')),
-    ('decimal_check', 'not a valid decimal', ValidationError),
-    ('decimal_check', 'NaN', ValidationError),
-])
+@pytest.mark.parametrize(
+    'field,value,result',
+    [
+        ('bool_check', True, True),
+        ('bool_check', False, False),
+        ('bool_check', None, False),
+        ('bool_check', '', False),
+        ('bool_check', 1, True),
+        ('bool_check', 'TRUE', True),
+        ('bool_check', b'TRUE', True),
+        ('bool_check', 'true', True),
+        ('bool_check', '1', True),
+        ('bool_check', '2', False),
+        ('bool_check', 2, True),
+        ('bool_check', 'on', True),
+        ('bool_check', 'yes', True),
+        ('str_check', 's', 's'),
+        ('str_check', '  s  ', 's'),
+        ('str_check', b's', 's'),
+        ('str_check', b'  s  ', 's'),
+        ('str_check', 1, '1'),
+        ('str_check', 'x' * 11, ValidationError),
+        ('str_check', b'x' * 11, ValidationError),
+        ('bytes_check', 's', b's'),
+        ('bytes_check', '  s  ', b's'),
+        ('bytes_check', b's', b's'),
+        ('bytes_check', b'  s  ', b's'),
+        ('bytes_check', 1, b'1'),
+        ('bytes_check', bytearray('xx', encoding='utf8'), b'xx'),
+        ('bytes_check', True, b'True'),
+        ('bytes_check', False, b'False'),
+        ('bytes_check', {}, ValidationError),
+        ('bytes_check', 'x' * 11, ValidationError),
+        ('bytes_check', b'x' * 11, ValidationError),
+        ('int_check', 1, 1),
+        ('int_check', 1.9, 1),
+        ('int_check', '1', 1),
+        ('int_check', '1.9', ValidationError),
+        ('int_check', b'1', 1),
+        ('int_check', 12, 12),
+        ('int_check', '12', 12),
+        ('int_check', b'12', 12),
+        ('float_check', 1, 1.0),
+        ('float_check', 1.0, 1.0),
+        ('float_check', '1.0', 1.0),
+        ('float_check', '1', 1.0),
+        ('float_check', b'1.0', 1.0),
+        ('float_check', b'1', 1.0),
+        ('uuid_check', 'ebcdab58-6eb8-46fb-a190-d07a33e9eac8', UUID('ebcdab58-6eb8-46fb-a190-d07a33e9eac8')),
+        ('uuid_check', UUID('ebcdab58-6eb8-46fb-a190-d07a33e9eac8'), UUID('ebcdab58-6eb8-46fb-a190-d07a33e9eac8')),
+        ('uuid_check', b'ebcdab58-6eb8-46fb-a190-d07a33e9eac8', UUID('ebcdab58-6eb8-46fb-a190-d07a33e9eac8')),
+        ('uuid_check', 'ebcdab58-6eb8-46fb-a190-', ValidationError),
+        ('uuid_check', 123, ValidationError),
+        ('decimal_check', 42.24, Decimal('42.24')),
+        ('decimal_check', '42.24', Decimal('42.24')),
+        ('decimal_check', b'42.24', Decimal('42.24')),
+        ('decimal_check', '  42.24  ', Decimal('42.24')),
+        ('decimal_check', Decimal('42.24'), Decimal('42.24')),
+        ('decimal_check', 'not a valid decimal', ValidationError),
+        ('decimal_check', 'NaN', ValidationError),
+    ],
+)
 def test_default_validators(field, value, result):
     kwargs = {field: value}
     if result == ValidationError:
@@ -214,10 +302,8 @@ def test_string_too_long():
             'loc': ('str_check',),
             'msg': 'ensure this value has at most 10 characters',
             'type': 'value_error.any_str.max_length',
-            'ctx': {
-                'limit_value': 10,
-            },
-        },
+            'ctx': {'limit_value': 10},
+        }
     ]
 
 
@@ -229,10 +315,8 @@ def test_string_too_short():
             'loc': ('str_check',),
             'msg': 'ensure this value has at least 5 characters',
             'type': 'value_error.any_str.min_length',
-            'ctx': {
-                'limit_value': 5,
-            },
-        },
+            'ctx': {'limit_value': 5},
+        }
     ]
 
 
@@ -244,47 +328,21 @@ class DatetimeModel(BaseModel):
 
 
 def test_datetime_successful():
-    m = DatetimeModel(
-        dt='2017-10-5T19:47:07',
-        date_=1494012000,
-        time_='10:20:30.400',
-        duration='15:30.0001',
-    )
+    m = DatetimeModel(dt='2017-10-5T19:47:07', date_=1_494_012_000, time_='10:20:30.400', duration='15:30.0001')
     assert m.dt == datetime(2017, 10, 5, 19, 47, 7)
     assert m.date_ == date(2017, 5, 5)
-    assert m.time_ == time(10, 20, 30, 400000)
+    assert m.time_ == time(10, 20, 30, 400_000)
     assert m.duration == timedelta(minutes=15, seconds=30, microseconds=100)
 
 
 def test_datetime_errors():
     with pytest.raises(ValueError) as exc_info:
-        DatetimeModel(
-            dt='2017-13-5T19:47:07',
-            date_='XX1494012000',
-            time_='25:20:30.400',
-            duration='15:30.0001 broken',
-        )
+        DatetimeModel(dt='2017-13-5T19:47:07', date_='XX1494012000', time_='25:20:30.400', duration='15:30.0001 broken')
     assert exc_info.value.errors() == [
-        {
-            'loc': ('dt',),
-            'msg': 'invalid datetime format',
-            'type': 'type_error.datetime',
-        },
-        {
-            'loc': ('date_',),
-            'msg': 'invalid date format',
-            'type': 'type_error.date',
-        },
-        {
-            'loc': ('time_',),
-            'msg': 'invalid time format',
-            'type': 'type_error.time',
-        },
-        {
-            'loc': ('duration',),
-            'msg': 'invalid duration format',
-            'type': 'type_error.duration',
-        },
+        {'loc': ('dt',), 'msg': 'invalid datetime format', 'type': 'type_error.datetime'},
+        {'loc': ('date_',), 'msg': 'invalid date format', 'type': 'type_error.date'},
+        {'loc': ('time_',), 'msg': 'invalid time format', 'type': 'type_error.time'},
+        {'loc': ('duration',), 'msg': 'invalid duration format', 'type': 'type_error.duration'},
     ]
 
 
@@ -314,12 +372,14 @@ def test_enum_fails():
     with pytest.raises(ValueError) as exc_info:
         CookingModel(tool=3)
     assert exc_info.value.errors() == [
-        {
-            'loc': ('tool',),
-            'msg': 'value is not a valid enumeration member',
-            'type': 'type_error.enum',
-        },
+        {'loc': ('tool',), 'msg': 'value is not a valid enumeration member', 'type': 'type_error.enum'}
     ]
+
+
+def test_int_enum_successful_for_str_int():
+    m = CookingModel(tool="2")
+    assert m.tool == ToolEnum.wrench
+    assert repr(m.tool) == '<ToolEnum.wrench: 2>'
 
 
 @pytest.mark.skipif(not email_validator, reason='email_validator not installed')
@@ -332,6 +392,7 @@ def test_string_success():
         str_curtailed: constr(curtail_length=5) = ...
         str_email: EmailStr = ...
         name_email: NameEmail = ...
+
     m = MoreStringsModel(
         str_strip_enabled='   xxx123   ',
         str_strip_disabled='   xxx123   ',
@@ -359,6 +420,7 @@ def test_string_fails():
         str_curtailed: constr(curtail_length=5) = ...
         str_email: EmailStr = ...
         name_email: NameEmail = ...
+
     with pytest.raises(ValidationError) as exc_info:
         MoreStringsModel(
             str_regex='xxx123xxx',
@@ -372,34 +434,23 @@ def test_string_fails():
             'loc': ('str_regex',),
             'msg': 'string does not match regex "^xxx\\d{3}$"',
             'type': 'value_error.str.regex',
-            'ctx': {
-                'pattern': '^xxx\\d{3}$',
-            },
+            'ctx': {'pattern': '^xxx\\d{3}$'},
         },
         {
             'loc': ('str_min_length',),
             'msg': 'ensure this value has at least 5 characters',
             'type': 'value_error.any_str.min_length',
-            'ctx': {
-                'limit_value': 5,
-            },
+            'ctx': {'limit_value': 5},
         },
-        {
-            'loc': ('str_email',),
-            'msg': 'value is not a valid email address',
-            'type': 'value_error.email',
-        },
-        {
-            'loc': ('name_email',),
-            'msg': 'value is not a valid email address',
-            'type': 'value_error.email',
-        },
+        {'loc': ('str_email',), 'msg': 'value is not a valid email address', 'type': 'value_error.email'},
+        {'loc': ('name_email',), 'msg': 'value is not a valid email address', 'type': 'value_error.email'},
     ]
 
 
 @pytest.mark.skipif(email_validator, reason='email_validator is installed')
 def test_email_validator_not_installed_email_str():
     with pytest.raises(ImportError):
+
         class Model(BaseModel):
             str_email: EmailStr = ...
 
@@ -407,6 +458,7 @@ def test_email_validator_not_installed_email_str():
 @pytest.mark.skipif(email_validator, reason='email_validator is installed')
 def test_email_validator_not_installed_name_email():
     with pytest.raises(ImportError):
+
         class Model(BaseModel):
             str_email: NameEmail = ...
 
@@ -420,21 +472,18 @@ def test_dict():
 
     with pytest.raises(ValidationError) as exc_info:
         Model(v=[1, 2, 3])
-    assert exc_info.value.errors() == [
-        {
-            'loc': ('v',),
-            'msg': 'value is not a valid dict',
-            'type': 'type_error.dict',
-        },
-    ]
+    assert exc_info.value.errors() == [{'loc': ('v',), 'msg': 'value is not a valid dict', 'type': 'type_error.dict'}]
 
 
-@pytest.mark.parametrize('value,result', (
-    ([1, 2, '3'], [1, 2, '3']),
-    ((1, 2, '3'), [1, 2, '3']),
-    ({1, 2, '3'}, list({1, 2, '3'})),
-    ((i**2 for i in range(5)), [0, 1, 4, 9, 16]),
-))
+@pytest.mark.parametrize(
+    'value,result',
+    (
+        ([1, 2, '3'], [1, 2, '3']),
+        ((1, 2, '3'), [1, 2, '3']),
+        ({1, 2, '3'}, list({1, 2, '3'})),
+        ((i ** 2 for i in range(5)), [0, 1, 4, 9, 16]),
+    ),
+)
 def test_list_success(value, result):
     class Model(BaseModel):
         v: list
@@ -442,23 +491,14 @@ def test_list_success(value, result):
     assert Model(v=value).v == result
 
 
-@pytest.mark.parametrize('value', (
-    123,
-    '123',
-))
+@pytest.mark.parametrize('value', (123, '123'))
 def test_list_fails(value):
     class Model(BaseModel):
         v: list
 
     with pytest.raises(ValidationError) as exc_info:
         Model(v=value)
-    assert exc_info.value.errors() == [
-        {
-            'loc': ('v',),
-            'msg': 'value is not a valid list',
-            'type': 'type_error.list',
-        },
-    ]
+    assert exc_info.value.errors() == [{'loc': ('v',), 'msg': 'value is not a valid list', 'type': 'type_error.list'}]
 
 
 def test_ordered_dict():
@@ -471,21 +511,18 @@ def test_ordered_dict():
 
     with pytest.raises(ValidationError) as exc_info:
         Model(v=[1, 2, 3])
-    assert exc_info.value.errors() == [
-        {
-            'loc': ('v',),
-            'msg': 'value is not a valid dict',
-            'type': 'type_error.dict',
-        },
-    ]
+    assert exc_info.value.errors() == [{'loc': ('v',), 'msg': 'value is not a valid dict', 'type': 'type_error.dict'}]
 
 
-@pytest.mark.parametrize('value,result', (
-    ([1, 2, '3'], (1, 2, '3')),
-    ((1, 2, '3'), (1, 2, '3')),
-    ({1, 2, '3'}, tuple({1, 2, '3'})),
-    ((i**2 for i in range(5)), (0, 1, 4, 9, 16)),
-))
+@pytest.mark.parametrize(
+    'value,result',
+    (
+        ([1, 2, '3'], (1, 2, '3')),
+        ((1, 2, '3'), (1, 2, '3')),
+        ({1, 2, '3'}, tuple({1, 2, '3'})),
+        ((i ** 2 for i in range(5)), (0, 1, 4, 9, 16)),
+    ),
+)
 def test_tuple_success(value, result):
     class Model(BaseModel):
         v: tuple
@@ -493,31 +530,64 @@ def test_tuple_success(value, result):
     assert Model(v=value).v == result
 
 
-@pytest.mark.parametrize('value', (
-    123,
-    '123',
-))
+@pytest.mark.parametrize('value', (123, '123'))
 def test_tuple_fails(value):
     class Model(BaseModel):
         v: tuple
 
     with pytest.raises(ValidationError) as exc_info:
         Model(v=value)
-    assert exc_info.value.errors() == [
-        {
-            'loc': ('v',),
-            'msg': 'value is not a valid tuple',
-            'type': 'type_error.tuple',
-        },
-    ]
+    assert exc_info.value.errors() == [{'loc': ('v',), 'msg': 'value is not a valid tuple', 'type': 'type_error.tuple'}]
 
 
-@pytest.mark.parametrize('value,result', (
-    ({1, 2, 2, '3'}, {1, 2, '3'}),
-    ((1, 2, 2, '3'), {1, 2, '3'}),
-    ([1, 2, 2, '3'], {1, 2, '3'}),
-    ({i**2 for i in range(5)}, {0, 1, 4, 9, 16}),
-))
+@pytest.mark.parametrize(
+    'value,cls,result',
+    (
+        ([1, 2, '3'], int, (1, 2, 3)),
+        ((1, 2, '3'), int, (1, 2, 3)),
+        ((i ** 2 for i in range(5)), int, (0, 1, 4, 9, 16)),
+        (('a', 'b', 'c'), str, ('a', 'b', 'c')),
+    ),
+)
+def test_tuple_variable_len_success(value, cls, result):
+    class Model(BaseModel):
+        v: Tuple[cls, ...]
+
+    assert Model(v=value).v == result
+
+
+@pytest.mark.parametrize(
+    'value, cls, exc',
+    [
+        (('a', 'b', [1, 2], 'c'), str, [{'loc': ('v', 2), 'msg': 'str type expected', 'type': 'type_error.str'}]),
+        (
+            ('a', 'b', [1, 2], 'c', [3, 4]),
+            str,
+            [
+                {'loc': ('v', 2), 'msg': 'str type expected', 'type': 'type_error.str'},
+                {'loc': ('v', 4), 'msg': 'str type expected', 'type': 'type_error.str'},
+            ],
+        ),
+    ],
+)
+def test_tuple_variable_len_fails(value, cls, exc):
+    class Model(BaseModel):
+        v: Tuple[cls, ...]
+
+    with pytest.raises(ValidationError) as exc_info:
+        Model(v=value)
+    assert exc_info.value.errors() == exc
+
+
+@pytest.mark.parametrize(
+    'value,result',
+    (
+        ({1, 2, 2, '3'}, {1, 2, '3'}),
+        ((1, 2, 2, '3'), {1, 2, '3'}),
+        ([1, 2, 2, '3'], {1, 2, '3'}),
+        ({i ** 2 for i in range(5)}, {0, 1, 4, 9, 16}),
+    ),
+)
 def test_set_success(value, result):
     class Model(BaseModel):
         v: set
@@ -525,23 +595,14 @@ def test_set_success(value, result):
     assert Model(v=value).v == result
 
 
-@pytest.mark.parametrize('value', (
-    123,
-    '123',
-))
+@pytest.mark.parametrize('value', (123, '123'))
 def test_set_fails(value):
     class Model(BaseModel):
         v: set
 
     with pytest.raises(ValidationError) as exc_info:
         Model(v=value)
-    assert exc_info.value.errors() == [
-        {
-            'loc': ('v',),
-            'msg': 'value is not a valid set',
-            'type': 'type_error.set',
-        },
-    ]
+    assert exc_info.value.errors() == [{'loc': ('v',), 'msg': 'value is not a valid set', 'type': 'type_error.set'}]
 
 
 def test_list_type_fails():
@@ -550,13 +611,7 @@ def test_list_type_fails():
 
     with pytest.raises(ValidationError) as exc_info:
         Model(v='123')
-    assert exc_info.value.errors() == [
-        {
-            'loc': ('v',),
-            'msg': 'value is not a valid list',
-            'type': 'type_error.list',
-        },
-    ]
+    assert exc_info.value.errors() == [{'loc': ('v',), 'msg': 'value is not a valid list', 'type': 'type_error.list'}]
 
 
 def test_set_type_fails():
@@ -565,13 +620,107 @@ def test_set_type_fails():
 
     with pytest.raises(ValidationError) as exc_info:
         Model(v='123')
-    assert exc_info.value.errors() == [
-        {
-            'loc': ('v',),
-            'msg': 'value is not a valid set',
-            'type': 'type_error.set',
-        },
-    ]
+    assert exc_info.value.errors() == [{'loc': ('v',), 'msg': 'value is not a valid set', 'type': 'type_error.set'}]
+
+
+@pytest.mark.parametrize(
+    'cls, value,result',
+    (
+        (int, [1, 2, 3], [1, 2, 3]),
+        (int, (1, 2, 3), (1, 2, 3)),
+        (float, {1.0, 2.0, 3.0}, {1.0, 2.0, 3.0}),
+        (Set[int], [{1, 2}, {3, 4}, {5, 6}], [{1, 2}, {3, 4}, {5, 6}]),
+        (Tuple[int, str], ((1, 'a'), (2, 'b'), (3, 'c')), ((1, 'a'), (2, 'b'), (3, 'c'))),
+    ),
+)
+def test_sequence_success(cls, value, result):
+    class Model(BaseModel):
+        v: Sequence[cls]
+
+    assert Model(v=value).v == result
+
+
+@pytest.mark.parametrize(
+    'cls, value,result',
+    (
+        (int, (i for i in range(3)), iter([0, 1, 2])),
+        (float, (float(i) for i in range(3)), iter([0.0, 1.0, 2.0])),
+        (str, (str(i) for i in range(3)), iter(['0', '1', '2'])),
+    ),
+)
+def test_sequence_generator_success(cls, value, result):
+    class Model(BaseModel):
+        v: Sequence[cls]
+
+    validated = Model(v=value).v
+    assert isinstance(validated, Iterator)
+    assert list(validated) == list(result)
+
+
+@pytest.mark.parametrize(
+    'cls,value,errors',
+    (
+        (
+            int,
+            (i for i in ['a', 'b', 'c']),
+            [
+                {'loc': ('v', 0), 'msg': 'value is not a valid integer', 'type': 'type_error.integer'},
+                {'loc': ('v', 1), 'msg': 'value is not a valid integer', 'type': 'type_error.integer'},
+                {'loc': ('v', 2), 'msg': 'value is not a valid integer', 'type': 'type_error.integer'},
+            ],
+        ),
+        (
+            float,
+            (i for i in ['a', 'b', 'c']),
+            [
+                {'loc': ('v', 0), 'msg': 'value is not a valid float', 'type': 'type_error.float'},
+                {'loc': ('v', 1), 'msg': 'value is not a valid float', 'type': 'type_error.float'},
+                {'loc': ('v', 2), 'msg': 'value is not a valid float', 'type': 'type_error.float'},
+            ],
+        ),
+    ),
+)
+def test_sequence_generator_fails(cls, value, errors):
+    class Model(BaseModel):
+        v: Sequence[cls]
+
+    with pytest.raises(ValidationError) as exc_info:
+        Model(v=value)
+    assert exc_info.value.errors() == errors
+
+
+@pytest.mark.parametrize(
+    'cls,value,errors',
+    (
+        (int, [1, 'a', 3], [{'loc': ('v', 1), 'msg': 'value is not a valid integer', 'type': 'type_error.integer'}]),
+        (int, (1, 2, 'a'), [{'loc': ('v', 2), 'msg': 'value is not a valid integer', 'type': 'type_error.integer'}]),
+        (float, range(10), [{'loc': ('v',), 'msg': 'value is not a valid sequence', 'type': 'type_error.sequence'}]),
+        (float, ('a', 2.2, 3.3), [{'loc': ('v', 0), 'msg': 'value is not a valid float', 'type': 'type_error.float'}]),
+        (float, (1.1, 2.2, 'a'), [{'loc': ('v', 2), 'msg': 'value is not a valid float', 'type': 'type_error.float'}]),
+        (
+            Set[int],
+            [{1, 2}, {2, 3}, {'d'}],
+            [{'loc': ('v', 2, 0), 'msg': 'value is not a valid integer', 'type': 'type_error.integer'}],
+        ),
+        (
+            Tuple[int, str],
+            ((1, 'a'), ('a', 'a'), (3, 'c')),
+            [{'loc': ('v', 1, 0), 'msg': 'value is not a valid integer', 'type': 'type_error.integer'}],
+        ),
+        (
+            List[int],
+            [{'a': 1, 'b': 2}, [1, 2], [2, 3]],
+            [{'loc': ('v', 0), 'msg': 'value is not a valid list', 'type': 'type_error.list'}],
+        ),
+    ),
+)
+def test_sequence_fails(cls, value, errors):
+    class Model(BaseModel):
+        v: Sequence[cls]
+
+    with pytest.raises(ValidationError) as exc_info:
+        Model(v=value)
+    assert exc_info.value.errors() == errors
 
 
 def test_int_validation():
@@ -580,44 +729,43 @@ def test_int_validation():
         b: NegativeInt = None
         c: conint(gt=4, lt=10) = None
         d: conint(ge=0, le=10) = None
+        e: conint(multiple_of=5) = None
 
-    m = Model(a=5, b=-5, c=5, d=0)
-    assert m == {'a': 5, 'b': -5, 'c': 5, 'd': 0}
+    m = Model(a=5, b=-5, c=5, d=0, e=25)
+    assert m == {'a': 5, 'b': -5, 'c': 5, 'd': 0, 'e': 25}
 
     with pytest.raises(ValidationError) as exc_info:
-        Model(a=-5, b=5, c=-5, d=11)
+        Model(a=-5, b=5, c=-5, d=11, e=42)
     assert exc_info.value.errors() == [
         {
             'loc': ('a',),
             'msg': 'ensure this value is greater than 0',
             'type': 'value_error.number.not_gt',
-            'ctx': {
-                'limit_value': 0,
-            },
+            'ctx': {'limit_value': 0},
         },
         {
             'loc': ('b',),
             'msg': 'ensure this value is less than 0',
             'type': 'value_error.number.not_lt',
-            'ctx': {
-                'limit_value': 0,
-            },
+            'ctx': {'limit_value': 0},
         },
         {
             'loc': ('c',),
             'msg': 'ensure this value is greater than 4',
             'type': 'value_error.number.not_gt',
-            'ctx': {
-                'limit_value': 4,
-            },
+            'ctx': {'limit_value': 4},
         },
         {
             'loc': ('d',),
             'msg': 'ensure this value is less than or equal to 10',
             'type': 'value_error.number.not_le',
-            'ctx': {
-                'limit_value': 10,
-            },
+            'ctx': {'limit_value': 10},
+        },
+        {
+            'loc': ('e',),
+            'msg': 'ensure this value is a multiple of 5',
+            'type': 'value_error.number.not_multiple',
+            'ctx': {'multiple_of': 5},
         },
     ]
 
@@ -628,44 +776,43 @@ def test_float_validation():
         b: NegativeFloat = None
         c: confloat(gt=4, lt=12.2) = None
         d: confloat(ge=0, le=9.9) = None
+        e: confloat(multiple_of=0.5) = None
 
-    m = Model(a=5.1, b=-5.2, c=5.3, d=9.9)
-    assert m.dict() == {'a': 5.1, 'b': -5.2, 'c': 5.3, 'd': 9.9}
+    m = Model(a=5.1, b=-5.2, c=5.3, d=9.9, e=2.5)
+    assert m.dict() == {'a': 5.1, 'b': -5.2, 'c': 5.3, 'd': 9.9, 'e': 2.5}
 
     with pytest.raises(ValidationError) as exc_info:
-        Model(a=-5.1, b=5.2, c=-5.3, d=9.91)
+        Model(a=-5.1, b=5.2, c=-5.3, d=9.91, e=4.2)
     assert exc_info.value.errors() == [
         {
             'loc': ('a',),
             'msg': 'ensure this value is greater than 0',
             'type': 'value_error.number.not_gt',
-            'ctx': {
-                'limit_value': 0,
-            },
+            'ctx': {'limit_value': 0},
         },
         {
             'loc': ('b',),
             'msg': 'ensure this value is less than 0',
             'type': 'value_error.number.not_lt',
-            'ctx': {
-                'limit_value': 0,
-            },
+            'ctx': {'limit_value': 0},
         },
         {
             'loc': ('c',),
             'msg': 'ensure this value is greater than 4',
             'type': 'value_error.number.not_gt',
-            'ctx': {
-                'limit_value': 4,
-            },
+            'ctx': {'limit_value': 4},
         },
         {
             'loc': ('d',),
             'msg': 'ensure this value is less than or equal to 9.9',
             'type': 'value_error.number.not_le',
-            'ctx': {
-                'limit_value': 9.9,
-            },
+            'ctx': {'limit_value': 9.9},
+        },
+        {
+            'loc': ('e',),
+            'msg': 'ensure this value is a multiple of 0.5',
+            'type': 'value_error.number.not_multiple',
+            'ctx': {'multiple_of': 0.5},
         },
     ]
 
@@ -689,13 +836,7 @@ def test_uuid_error():
 
     with pytest.raises(ValidationError) as exc_info:
         Model(v='ebcdab58-6eb8-46fb-a190-d07a3')
-    assert exc_info.value.errors() == [
-        {
-            'loc': ('v',),
-            'msg': 'value is not a valid uuid',
-            'type': 'type_error.uuid',
-        },
-    ]
+    assert exc_info.value.errors() == [{'loc': ('v',), 'msg': 'value is not a valid uuid', 'type': 'type_error.uuid'}]
 
     with pytest.raises(ValidationError):
         Model(v=None)
@@ -715,12 +856,7 @@ def test_uuid_validation():
     d = uuid.uuid5(uuid.NAMESPACE_DNS, 'python.org')
 
     m = UUIDModel(a=a, b=b, c=c, d=d)
-    assert m.dict() == {
-        'a': a,
-        'b': b,
-        'c': c,
-        'd': d,
-    }
+    assert m.dict() == {'a': a, 'b': b, 'c': c, 'd': d}
 
     with pytest.raises(ValidationError) as exc_info:
         UUIDModel(a=d, b=c, c=b, d=a)
@@ -729,33 +865,25 @@ def test_uuid_validation():
             'loc': ('a',),
             'msg': 'uuid version 1 expected',
             'type': 'value_error.uuid.version',
-            'ctx': {
-                'required_version': 1,
-            },
+            'ctx': {'required_version': 1},
         },
         {
             'loc': ('b',),
             'msg': 'uuid version 3 expected',
             'type': 'value_error.uuid.version',
-            'ctx': {
-                'required_version': 3,
-            },
+            'ctx': {'required_version': 3},
         },
         {
             'loc': ('c',),
             'msg': 'uuid version 4 expected',
             'type': 'value_error.uuid.version',
-            'ctx': {
-                'required_version': 4,
-            },
+            'ctx': {'required_version': 4},
         },
         {
             'loc': ('d',),
             'msg': 'uuid version 5 expected',
             'type': 'value_error.uuid.version',
-            'ctx': {
-                'required_version': 5,
-            },
+            'ctx': {'required_version': 5},
         },
     ]
 
@@ -786,136 +914,185 @@ def test_anystr_strip_whitespace_disabled():
     assert m.bytes_check == b'  456  '
 
 
-@pytest.mark.parametrize('type_,value,result', [
-    (condecimal(gt=Decimal('42.24')), Decimal('43'), Decimal('43')),
-    (condecimal(gt=Decimal('42.24')), Decimal('42'), [
-        {
-            'loc': ('foo',),
-            'msg': 'ensure this value is greater than 42.24',
-            'type': 'value_error.number.not_gt',
-            'ctx': {
-                'limit_value': Decimal('42.24'),
-            },
-        },
-    ]),
-    (condecimal(lt=Decimal('42.24')), Decimal('42'), Decimal('42')),
-    (condecimal(lt=Decimal('42.24')), Decimal('43'), [
-        {
-            'loc': ('foo',),
-            'msg': 'ensure this value is less than 42.24',
-            'type': 'value_error.number.not_lt',
-            'ctx': {
-                'limit_value': Decimal('42.24'),
-            },
-        },
-    ]),
-    (condecimal(ge=Decimal('42.24')), Decimal('43'), Decimal('43')),
-    (condecimal(ge=Decimal('42.24')), Decimal('42.24'), Decimal('42.24')),
-    (condecimal(ge=Decimal('42.24')), Decimal('42'), [
-        {
-            'loc': ('foo',),
-            'msg': 'ensure this value is greater than or equal to 42.24',
-            'type': 'value_error.number.not_ge',
-            'ctx': {
-                'limit_value': Decimal('42.24'),
-            },
-        },
-    ]),
-    (condecimal(le=Decimal('42.24')), Decimal('42'), Decimal('42')),
-    (condecimal(le=Decimal('42.24')), Decimal('42.24'), Decimal('42.24')),
-    (condecimal(le=Decimal('42.24')), Decimal('43'), [
-        {
-            'loc': ('foo',),
-            'msg': 'ensure this value is less than or equal to 42.24',
-            'type': 'value_error.number.not_le',
-            'ctx': {
-                'limit_value': Decimal('42.24'),
-            },
-        },
-    ]),
-    (condecimal(max_digits=2, decimal_places=2), Decimal('0.99'), Decimal('0.99')),
-    (condecimal(max_digits=2, decimal_places=1), Decimal('0.99'), [
-        {
-            'loc': ('foo',),
-            'msg': 'ensure that there are no more than 1 decimal places',
-            'type': 'value_error.decimal.max_places',
-            'ctx': {
-                'decimal_places': 1,
-            },
-        },
-    ]),
-    (condecimal(max_digits=3, decimal_places=1), Decimal('999'), [
-        {
-            'loc': ('foo',),
-            'msg': 'ensure that there are no more than 2 digits before the decimal point',
-            'type': 'value_error.decimal.whole_digits',
-            'ctx': {
-                'whole_digits': 2,
-            },
-        },
-    ]),
-    (condecimal(max_digits=4, decimal_places=1), Decimal('999'), Decimal('999')),
-    (condecimal(max_digits=20, decimal_places=2), Decimal('742403889818000000'), Decimal('742403889818000000')),
-    (condecimal(max_digits=20, decimal_places=2), Decimal('7.42403889818E+17'), Decimal('7.42403889818E+17')),
-    (condecimal(max_digits=20, decimal_places=2), Decimal('7424742403889818000000'), [
-        {
-            'loc': ('foo',),
-            'msg': 'ensure that there are no more than 20 digits in total',
-            'type': 'value_error.decimal.max_digits',
-            'ctx': {
-                'max_digits': 20,
-            },
-        },
-    ]),
-    (condecimal(max_digits=5, decimal_places=2), Decimal('7304E-1'), Decimal('7304E-1')),
-    (condecimal(max_digits=5, decimal_places=2), Decimal('7304E-3'), [
-        {
-            'loc': ('foo',),
-            'msg': 'ensure that there are no more than 2 decimal places',
-            'type': 'value_error.decimal.max_places',
-            'ctx': {
-                'decimal_places': 2,
-            },
-        },
-    ]),
-    (condecimal(max_digits=5, decimal_places=5), Decimal('70E-5'), Decimal('70E-5')),
-    (condecimal(max_digits=5, decimal_places=5), Decimal('70E-6'), [
-        {
-            'loc': ('foo',),
-            'msg': 'ensure that there are no more than 5 digits in total',
-            'type': 'value_error.decimal.max_digits',
-            'ctx': {
-                'max_digits': 5,
-            },
-        },
-    ]),
-    *[
-        (condecimal(decimal_places=2, max_digits=10), value, [
-            {
-                'loc': ('foo',),
-                'msg': 'value is not a valid decimal',
-                'type': 'value_error.decimal.not_finite',
-            },
-        ])
-        for value in (
-            'NaN', '-NaN', '+NaN', 'sNaN', '-sNaN', '+sNaN', 'Inf', '-Inf', '+Inf',
-            'Infinity', '-Infinity', '-Infinity',
-        )
+@pytest.mark.parametrize(
+    'type_,value,result',
+    [
+        (condecimal(gt=Decimal('42.24')), Decimal('43'), Decimal('43')),
+        (
+            condecimal(gt=Decimal('42.24')),
+            Decimal('42'),
+            [
+                {
+                    'loc': ('foo',),
+                    'msg': 'ensure this value is greater than 42.24',
+                    'type': 'value_error.number.not_gt',
+                    'ctx': {'limit_value': Decimal('42.24')},
+                }
+            ],
+        ),
+        (condecimal(lt=Decimal('42.24')), Decimal('42'), Decimal('42')),
+        (
+            condecimal(lt=Decimal('42.24')),
+            Decimal('43'),
+            [
+                {
+                    'loc': ('foo',),
+                    'msg': 'ensure this value is less than 42.24',
+                    'type': 'value_error.number.not_lt',
+                    'ctx': {'limit_value': Decimal('42.24')},
+                }
+            ],
+        ),
+        (condecimal(ge=Decimal('42.24')), Decimal('43'), Decimal('43')),
+        (condecimal(ge=Decimal('42.24')), Decimal('42.24'), Decimal('42.24')),
+        (
+            condecimal(ge=Decimal('42.24')),
+            Decimal('42'),
+            [
+                {
+                    'loc': ('foo',),
+                    'msg': 'ensure this value is greater than or equal to 42.24',
+                    'type': 'value_error.number.not_ge',
+                    'ctx': {'limit_value': Decimal('42.24')},
+                }
+            ],
+        ),
+        (condecimal(le=Decimal('42.24')), Decimal('42'), Decimal('42')),
+        (condecimal(le=Decimal('42.24')), Decimal('42.24'), Decimal('42.24')),
+        (
+            condecimal(le=Decimal('42.24')),
+            Decimal('43'),
+            [
+                {
+                    'loc': ('foo',),
+                    'msg': 'ensure this value is less than or equal to 42.24',
+                    'type': 'value_error.number.not_le',
+                    'ctx': {'limit_value': Decimal('42.24')},
+                }
+            ],
+        ),
+        (condecimal(max_digits=2, decimal_places=2), Decimal('0.99'), Decimal('0.99')),
+        (
+            condecimal(max_digits=2, decimal_places=1),
+            Decimal('0.99'),
+            [
+                {
+                    'loc': ('foo',),
+                    'msg': 'ensure that there are no more than 1 decimal places',
+                    'type': 'value_error.decimal.max_places',
+                    'ctx': {'decimal_places': 1},
+                }
+            ],
+        ),
+        (
+            condecimal(max_digits=3, decimal_places=1),
+            Decimal('999'),
+            [
+                {
+                    'loc': ('foo',),
+                    'msg': 'ensure that there are no more than 2 digits before the decimal point',
+                    'type': 'value_error.decimal.whole_digits',
+                    'ctx': {'whole_digits': 2},
+                }
+            ],
+        ),
+        (condecimal(max_digits=4, decimal_places=1), Decimal('999'), Decimal('999')),
+        (condecimal(max_digits=20, decimal_places=2), Decimal('742403889818000000'), Decimal('742403889818000000')),
+        (condecimal(max_digits=20, decimal_places=2), Decimal('7.42403889818E+17'), Decimal('7.42403889818E+17')),
+        (
+            condecimal(max_digits=20, decimal_places=2),
+            Decimal('7424742403889818000000'),
+            [
+                {
+                    'loc': ('foo',),
+                    'msg': 'ensure that there are no more than 20 digits in total',
+                    'type': 'value_error.decimal.max_digits',
+                    'ctx': {'max_digits': 20},
+                }
+            ],
+        ),
+        (condecimal(max_digits=5, decimal_places=2), Decimal('7304E-1'), Decimal('7304E-1')),
+        (
+            condecimal(max_digits=5, decimal_places=2),
+            Decimal('7304E-3'),
+            [
+                {
+                    'loc': ('foo',),
+                    'msg': 'ensure that there are no more than 2 decimal places',
+                    'type': 'value_error.decimal.max_places',
+                    'ctx': {'decimal_places': 2},
+                }
+            ],
+        ),
+        (condecimal(max_digits=5, decimal_places=5), Decimal('70E-5'), Decimal('70E-5')),
+        (
+            condecimal(max_digits=5, decimal_places=5),
+            Decimal('70E-6'),
+            [
+                {
+                    'loc': ('foo',),
+                    'msg': 'ensure that there are no more than 5 digits in total',
+                    'type': 'value_error.decimal.max_digits',
+                    'ctx': {'max_digits': 5},
+                }
+            ],
+        ),
+        *[
+            (
+                condecimal(decimal_places=2, max_digits=10),
+                value,
+                [{'loc': ('foo',), 'msg': 'value is not a valid decimal', 'type': 'value_error.decimal.not_finite'}],
+            )
+            for value in (
+                'NaN',
+                '-NaN',
+                '+NaN',
+                'sNaN',
+                '-sNaN',
+                '+sNaN',
+                'Inf',
+                '-Inf',
+                '+Inf',
+                'Infinity',
+                '-Infinity',
+                '-Infinity',
+            )
+        ],
+        *[
+            (
+                condecimal(decimal_places=2, max_digits=10),
+                Decimal(value),
+                [{'loc': ('foo',), 'msg': 'value is not a valid decimal', 'type': 'value_error.decimal.not_finite'}],
+            )
+            for value in (
+                'NaN',
+                '-NaN',
+                '+NaN',
+                'sNaN',
+                '-sNaN',
+                '+sNaN',
+                'Inf',
+                '-Inf',
+                '+Inf',
+                'Infinity',
+                '-Infinity',
+                '-Infinity',
+            )
+        ],
+        (
+            condecimal(multiple_of=Decimal('5')),
+            Decimal('42'),
+            [
+                {
+                    'loc': ('foo',),
+                    'msg': 'ensure this value is a multiple of 5',
+                    'type': 'value_error.number.not_multiple',
+                    'ctx': {'multiple_of': Decimal('5')},
+                }
+            ],
+        ),
     ],
-    *[
-        (condecimal(decimal_places=2, max_digits=10), Decimal(value), [
-            {
-                'loc': ('foo',),
-                'msg': 'value is not a valid decimal',
-                'type': 'value_error.decimal.not_finite',
-            },
-        ])
-        for value in (
-            'NaN', '-NaN', '+NaN', 'sNaN', '-sNaN', '+sNaN', 'Inf', '-Inf', '+Inf',
-            'Infinity', '-Infinity', '-Infinity',
-        )
-    ],
-])
+)
 def test_decimal_validation(type_, value, result):
     model = create_model('DecimalModel', foo=(type_, ...))
 
@@ -927,10 +1104,7 @@ def test_decimal_validation(type_, value, result):
         assert model(foo=value).foo == result
 
 
-@pytest.mark.parametrize('value,result', (
-    ('/test/path', Path('/test/path')),
-    (Path('/test/path'), Path('/test/path')),
-))
+@pytest.mark.parametrize('value,result', (('/test/path', Path('/test/path')), (Path('/test/path'), Path('/test/path'))))
 def test_path_validation_success(value, result):
     class Model(BaseModel):
         foo: Path
@@ -944,19 +1118,13 @@ def test_path_validation_fails():
 
     with pytest.raises(ValidationError) as exc_info:
         Model(foo=None)
-    assert exc_info.value.errors() == [
-        {
-            'loc': ('foo',),
-            'msg': 'value is not a valid path',
-            'type': 'type_error.path',
-        },
-    ]
+    assert exc_info.value.errors() == [{'loc': ('foo',), 'msg': 'value is not a valid path', 'type': 'type_error.path'}]
 
 
-@pytest.mark.parametrize('value,result', (
-    ('tests/test_types.py', Path('tests/test_types.py')),
-    (Path('tests/test_types.py'), Path('tests/test_types.py')),
-))
+@pytest.mark.parametrize(
+    'value,result',
+    (('tests/test_types.py', Path('tests/test_types.py')), (Path('tests/test_types.py'), Path('tests/test_types.py'))),
+)
 def test_file_path_validation_success(value, result):
     class Model(BaseModel):
         foo: FilePath
@@ -964,48 +1132,55 @@ def test_file_path_validation_success(value, result):
     assert Model(foo=value).foo == result
 
 
-@pytest.mark.parametrize('value,errors', (
-    ('nonexistentfile', [
-        {
-            'loc': ('foo',),
-            'msg': 'file or directory at path "nonexistentfile" does not exist',
-            'type': 'value_error.path.not_exists',
-            'ctx': {
-                'path': 'nonexistentfile',
-            },
-        },
-    ]),
-    (Path('nonexistentfile'), [
-        {
-            'loc': ('foo',),
-            'msg': 'file or directory at path "nonexistentfile" does not exist',
-            'type': 'value_error.path.not_exists',
-            'ctx': {
-                'path': 'nonexistentfile',
-            },
-        },
-    ]),
-    ('tests', [
-        {
-            'loc': ('foo',),
-            'msg': 'path "tests" does not point to a file',
-            'type': 'value_error.path.not_a_file',
-            'ctx': {
-                'path': 'tests',
-            },
-        },
-    ]),
-    (Path('tests'), [
-        {
-            'loc': ('foo',),
-            'msg': 'path "tests" does not point to a file',
-            'type': 'value_error.path.not_a_file',
-            'ctx': {
-                'path': 'tests',
-            },
-        },
-    ]),
-))
+@pytest.mark.parametrize(
+    'value,errors',
+    (
+        (
+            'nonexistentfile',
+            [
+                {
+                    'loc': ('foo',),
+                    'msg': 'file or directory at path "nonexistentfile" does not exist',
+                    'type': 'value_error.path.not_exists',
+                    'ctx': {'path': 'nonexistentfile'},
+                }
+            ],
+        ),
+        (
+            Path('nonexistentfile'),
+            [
+                {
+                    'loc': ('foo',),
+                    'msg': 'file or directory at path "nonexistentfile" does not exist',
+                    'type': 'value_error.path.not_exists',
+                    'ctx': {'path': 'nonexistentfile'},
+                }
+            ],
+        ),
+        (
+            'tests',
+            [
+                {
+                    'loc': ('foo',),
+                    'msg': 'path "tests" does not point to a file',
+                    'type': 'value_error.path.not_a_file',
+                    'ctx': {'path': 'tests'},
+                }
+            ],
+        ),
+        (
+            Path('tests'),
+            [
+                {
+                    'loc': ('foo',),
+                    'msg': 'path "tests" does not point to a file',
+                    'type': 'value_error.path.not_a_file',
+                    'ctx': {'path': 'tests'},
+                }
+            ],
+        ),
+    ),
+)
 def test_file_path_validation_fails(value, errors):
     class Model(BaseModel):
         foo: FilePath
@@ -1015,10 +1190,7 @@ def test_file_path_validation_fails(value, errors):
     assert exc_info.value.errors() == errors
 
 
-@pytest.mark.parametrize('value,result', (
-    ('tests', Path('tests')),
-    (Path('tests'), Path('tests')),
-))
+@pytest.mark.parametrize('value,result', (('tests', Path('tests')), (Path('tests'), Path('tests'))))
 def test_directory_path_validation_success(value, result):
     class Model(BaseModel):
         foo: DirectoryPath
@@ -1026,48 +1198,56 @@ def test_directory_path_validation_success(value, result):
     assert Model(foo=value).foo == result
 
 
-@pytest.mark.parametrize('value,errors', (
-    ('nonexistentdirectory', [
-        {
-            'loc': ('foo',),
-            'msg': 'file or directory at path "nonexistentdirectory" does not exist',
-            'type': 'value_error.path.not_exists',
-            'ctx': {
-                'path': 'nonexistentdirectory',
-            },
-        },
-    ]),
-    (Path('nonexistentdirectory'), [
-        {
-            'loc': ('foo',),
-            'msg': 'file or directory at path "nonexistentdirectory" does not exist',
-            'type': 'value_error.path.not_exists',
-            'ctx': {
-                'path': 'nonexistentdirectory',
-            },
-        },
-    ]),
-    ('tests/test_types.py', [
-        {
-            'loc': ('foo',),
-            'msg': 'path "tests/test_types.py" does not point to a directory',
-            'type': 'value_error.path.not_a_directory',
-            'ctx': {
-                'path': 'tests/test_types.py',
-            },
-        },
-    ]),
-    (Path('tests/test_types.py'), [
-        {
-            'loc': ('foo',),
-            'msg': 'path "tests/test_types.py" does not point to a directory',
-            'type': 'value_error.path.not_a_directory',
-            'ctx': {
-                'path': 'tests/test_types.py',
-            },
-        },
-    ]),
-))
+@pytest.mark.skipif(sys.platform.startswith('win'), reason='paths look different on windows')
+@pytest.mark.parametrize(
+    'value,errors',
+    (
+        (
+            'nonexistentdirectory',
+            [
+                {
+                    'loc': ('foo',),
+                    'msg': 'file or directory at path "nonexistentdirectory" does not exist',
+                    'type': 'value_error.path.not_exists',
+                    'ctx': {'path': 'nonexistentdirectory'},
+                }
+            ],
+        ),
+        (
+            Path('nonexistentdirectory'),
+            [
+                {
+                    'loc': ('foo',),
+                    'msg': 'file or directory at path "nonexistentdirectory" does not exist',
+                    'type': 'value_error.path.not_exists',
+                    'ctx': {'path': 'nonexistentdirectory'},
+                }
+            ],
+        ),
+        (
+            'tests/test_types.py',
+            [
+                {
+                    'loc': ('foo',),
+                    'msg': 'path "tests/test_types.py" does not point to a directory',
+                    'type': 'value_error.path.not_a_directory',
+                    'ctx': {'path': 'tests/test_types.py'},
+                }
+            ],
+        ),
+        (
+            Path('tests/test_types.py'),
+            [
+                {
+                    'loc': ('foo',),
+                    'msg': 'path "tests/test_types.py" does not point to a directory',
+                    'type': 'value_error.path.not_a_directory',
+                    'ctx': {'path': 'tests/test_types.py'},
+                }
+            ],
+        ),
+    ),
+)
 def test_directory_path_validation_fails(value, errors):
     class Model(BaseModel):
         foo: DirectoryPath
@@ -1124,6 +1304,18 @@ def test_number_le():
         Model(a=6)
 
 
+def test_number_multiple_of():
+    class Model(BaseModel):
+        a: conint(multiple_of=5)
+
+    assert Model(a=10).dict() == {'a': 10}
+
+    multiple_message = base_message.replace('limit_value', 'multiple_of')
+    message = multiple_message.format(msg='a multiple of 5', ty='multiple', value=5)
+    with pytest.raises(ValidationError, match=message):
+        Model(a=42)
+
+
 @pytest.mark.parametrize('fn', [conint, confloat, condecimal])
 def test_bounds_config_exceptions(fn):
     with pytest.raises(ConfigError):
@@ -1142,10 +1334,7 @@ def test_new_type_success():
         b: b_type
 
     m = Model(a=42, b=24)
-    assert m.dict() == {
-        'a': 42,
-        'b': 24,
-    }
+    assert m.dict() == {'a': 42, 'b': 24}
 
 
 def test_new_type_fails():
@@ -1159,16 +1348,8 @@ def test_new_type_fails():
     with pytest.raises(ValidationError) as exc_info:
         Model(a='foo', b='bar')
     assert exc_info.value.errors() == [
-        {
-            'loc': ('a',),
-            'msg': 'value is not a valid integer',
-            'type': 'type_error.integer',
-        },
-        {
-            'loc': ('b',),
-            'msg': 'value is not a valid integer',
-            'type': 'type_error.integer',
-        },
+        {'loc': ('a',), 'msg': 'value is not a valid integer', 'type': 'type_error.integer'},
+        {'loc': ('b',), 'msg': 'value is not a valid integer', 'type': 'type_error.integer'},
     ]
 
 
@@ -1187,11 +1368,7 @@ def test_invalid_simple_json():
     obj = '{a: 1, b: [2, 3]}'
     with pytest.raises(ValidationError) as exc_info:
         JsonModel(json_obj=obj)
-    assert exc_info.value.errors()[0] == {
-        'loc': ('json_obj',),
-        'msg': 'Invalid JSON',
-        'type': 'value_error.json'
-    }
+    assert exc_info.value.errors()[0] == {'loc': ('json_obj',), 'msg': 'Invalid JSON', 'type': 'value_error.json'}
 
 
 def test_valid_simple_json_bytes():
@@ -1217,11 +1394,7 @@ def test_invalid_detailed_json_value_error():
     obj = '(1, 2, 3)'
     with pytest.raises(ValidationError) as exc_info:
         JsonDetailedModel(json_obj=obj)
-    assert exc_info.value.errors()[0] == {
-        'loc': ('json_obj',),
-        'msg': 'Invalid JSON',
-        'type': 'value_error.json'
-    }
+    assert exc_info.value.errors()[0] == {'loc': ('json_obj',), 'msg': 'Invalid JSON', 'type': 'value_error.json'}
 
 
 def test_valid_detailed_json_bytes():
@@ -1242,7 +1415,7 @@ def test_invalid_detailed_json_type_error():
     assert exc_info.value.errors() == [
         {'loc': ('json_obj', 0), 'msg': 'value is not a valid integer', 'type': 'type_error.integer'},
         {'loc': ('json_obj', 1), 'msg': 'value is not a valid integer', 'type': 'type_error.integer'},
-        {'loc': ('json_obj', 2), 'msg': 'value is not a valid integer', 'type': 'type_error.integer'}
+        {'loc': ('json_obj', 2), 'msg': 'value is not a valid integer', 'type': 'type_error.integer'},
     ]
 
 
@@ -1256,5 +1429,122 @@ def test_json_not_str():
     assert exc_info.value.errors()[0] == {
         'loc': ('json_obj',),
         'msg': 'JSON object must be str, bytes or bytearray',
-        'type': 'type_error.json'
+        'type': 'type_error.json',
     }
+
+
+def test_pattern():
+    class Foobar(BaseModel):
+        pattern: Pattern
+
+    f = Foobar(pattern=r'^whatev.r\d$')
+    # SRE_Pattern for 3.6, Pattern for 3.7
+    assert f.pattern.__class__.__name__ in {'SRE_Pattern', 'Pattern'}
+    # check it's really a proper pattern
+    assert f.pattern.match('whatever1')
+    assert not f.pattern.match(' whatever1')
+
+
+def test_pattern_error():
+    class Foobar(BaseModel):
+        pattern: Pattern
+
+    with pytest.raises(ValidationError) as exc_info:
+        Foobar(pattern=f'[xx')
+    assert exc_info.value.errors() == [
+        {'loc': ('pattern',), 'msg': 'Invalid regular expression', 'type': 'value_error.regex_pattern'}
+    ]
+
+
+def test_secretstr():
+    class Foobar(BaseModel):
+        password: SecretStr
+        empty_password: SecretStr
+
+    # Initialize the model.
+    f = Foobar(password='1234', empty_password='')
+
+    # Assert correct types.
+    assert f.password.__class__.__name__ == 'SecretStr'
+    assert f.empty_password.__class__.__name__ == 'SecretStr'
+
+    # Assert str and repr are correct.
+    assert str(f.password) == "SecretStr('**********')"
+    assert str(f.empty_password) == "SecretStr('')"
+    assert repr(f.password) == "SecretStr('**********')"
+    assert repr(f.empty_password) == "SecretStr('')"
+
+    # Assert retrieval of secret value is correct
+    assert f.password.get_secret_value() == '1234'
+    assert f.empty_password.get_secret_value() == ''
+
+    # Assert display function is correct
+    assert f.password.display() == '**********'
+    assert f.empty_password.display() == ''
+
+
+def test_secretstr_error():
+    class Foobar(BaseModel):
+        password: SecretStr
+
+    with pytest.raises(ValidationError) as exc_info:
+        Foobar(password=[6, 23, 'abc'])
+    assert exc_info.value.errors() == [{'loc': ('password',), 'msg': 'str type expected', 'type': 'type_error.str'}]
+
+
+def test_secretbytes():
+    class Foobar(BaseModel):
+        password: SecretBytes
+        empty_password: SecretBytes
+
+    # Initialize the model.
+    f = Foobar(password=b'wearebytes', empty_password=b'')
+
+    # Assert correct types.
+    assert f.password.__class__.__name__ == 'SecretBytes'
+    assert f.empty_password.__class__.__name__ == 'SecretBytes'
+
+    # Assert str and repr are correct.
+    assert str(f.password) == "SecretBytes(b'**********')"
+    assert str(f.empty_password) == "SecretBytes(b'')"
+    assert repr(f.password) == "SecretBytes(b'**********')"
+    assert repr(f.empty_password) == "SecretBytes(b'')"
+
+    # Assert retrieval of secret value is correct
+    assert f.password.get_secret_value() == b'wearebytes'
+    assert f.empty_password.get_secret_value() == b''
+
+    # Assert display function is correct
+    assert f.password.display() == '**********'
+    assert f.empty_password.display() == ''
+
+
+def test_secretbytes_error():
+    class Foobar(BaseModel):
+        password: SecretBytes
+
+    with pytest.raises(ValidationError) as exc_info:
+        Foobar(password=[6, 23, 'abc'])
+    assert exc_info.value.errors() == [{'loc': ('password',), 'msg': 'byte type expected', 'type': 'type_error.bytes'}]
+
+
+def test_generic_without_params():
+    class Model(BaseModel):
+        generic_list: List
+        generic_dict: Dict
+
+    m = Model(generic_list=[0, 'a'], generic_dict={0: 'a', 'a': 0})
+    assert m.dict() == {'generic_list': [0, 'a'], 'generic_dict': {0: 'a', 'a': 0}}
+
+
+def test_generic_without_params_error():
+    class Model(BaseModel):
+        generic_list: List
+        generic_dict: Dict
+
+    with pytest.raises(ValidationError) as exc_info:
+        Model(generic_list=0, generic_dict=0)
+    assert exc_info.value.errors() == [
+        {'loc': ('generic_list',), 'msg': 'value is not a valid list', 'type': 'type_error.list'},
+        {'loc': ('generic_dict',), 'msg': 'value is not a valid dict', 'type': 'type_error.dict'},
+    ]

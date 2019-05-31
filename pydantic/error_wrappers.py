@@ -1,26 +1,30 @@
 import json
 from functools import lru_cache
+from typing import TYPE_CHECKING, Any, Dict, Generator, List, Optional, Sequence, Tuple, Type, Union
 
-__all__ = (
-    'ErrorWrapper',
-    'ValidationError',
-)
+if TYPE_CHECKING:  # pragma: no cover
+    from pydantic import BaseConfig  # noqa: F401
+
+__all__ = ('ErrorWrapper', 'ValidationError')
 
 
 class ErrorWrapper:
-    __slots__ = 'exc', 'loc', 'msg_template'
+    __slots__ = 'exc', 'type_', 'loc', 'msg_template'
 
-    def __init__(self, exc, *, loc, config=None):
+    def __init__(
+        self, exc: Exception, *, loc: Union[Tuple[str, ...], str], config: Optional[Type['BaseConfig']] = None
+    ) -> None:
         self.exc = exc
-        self.loc = loc if isinstance(loc, tuple) else (loc,)
+        self.type_ = get_exc_type(type(exc))
+        self.loc: Tuple[str, ...] = loc if isinstance(loc, tuple) else (loc,)  # type: ignore
         self.msg_template = config.error_msg_templates.get(self.type_) if config else None
 
     @property
-    def ctx(self):
+    def ctx(self) -> Dict[str, Any]:
         return getattr(self.exc, 'ctx', None)
 
     @property
-    def msg(self):
+    def msg(self) -> str:
         default_msg_template = getattr(self.exc, 'msg_template', None)
         msg_template = self.msg_template or default_msg_template
         if msg_template:
@@ -28,18 +32,10 @@ class ErrorWrapper:
 
         return str(self.exc)
 
-    @property
-    def type_(self):
-        return get_exc_type(self.exc)
-
-    def dict(self, *, loc_prefix=None):
+    def dict(self, *, loc_prefix: Optional[Tuple[str, ...]] = None) -> Dict[str, Any]:
         loc = self.loc if loc_prefix is None else loc_prefix + self.loc
 
-        d = {
-            'loc': loc,
-            'msg': self.msg,
-            'type': self.type_,
-        }
+        d: Dict[str, Any] = {'loc': loc, 'msg': self.msg, 'type': self.type_}
 
         if self.ctx is not None:
             d['ctx'] = self.ctx
@@ -47,37 +43,39 @@ class ErrorWrapper:
         return d
 
 
-class ValidationError(ValueError):
-    __slots__ = 'raw_errors',
+# ErrorList is something like Union[List[Union[List[ErrorWrapper], ErrorWrapper]], ErrorWrapper]
+# but recursive, therefore just use:
+ErrorList = Union[Sequence[Any], ErrorWrapper]
 
-    def __init__(self, errors):
+
+class ValidationError(ValueError):
+    __slots__ = ('raw_errors',)
+
+    def __init__(self, errors: Sequence[ErrorList]) -> None:
         self.raw_errors = errors
 
     @lru_cache()
-    def errors(self):
+    def errors(self) -> List[Dict[str, Any]]:
         return list(flatten_errors(self.raw_errors))
 
-    def json(self, *, indent=2):
+    def json(self, *, indent: Union[None, int, str] = 2) -> str:
         return json.dumps(self.errors(), indent=indent)
 
-    def __str__(self):
+    def __str__(self) -> str:
         errors = self.errors()
         no_errors = len(errors)
         return f'{no_errors} validation error{"" if no_errors == 1 else "s"}\n{display_errors(errors)}'
 
 
-def display_errors(errors):
-    return '\n'.join(
-        f'{_display_error_loc(e)}\n  {e["msg"]} ({_display_error_type_and_ctx(e)})'
-        for e in errors
-    )
+def display_errors(errors: List[Dict[str, Any]]) -> str:
+    return '\n'.join(f'{_display_error_loc(e)}\n  {e["msg"]} ({_display_error_type_and_ctx(e)})' for e in errors)
 
 
-def _display_error_loc(error):
+def _display_error_loc(error: Dict[str, Any]) -> str:
     return ' -> '.join(str(l) for l in error['loc'])
 
 
-def _display_error_type_and_ctx(error):
+def _display_error_type_and_ctx(error: Dict[str, Any]) -> str:
     t = 'type=' + error['type']
     ctx = error.get('ctx')
     if ctx:
@@ -86,11 +84,17 @@ def _display_error_type_and_ctx(error):
         return t
 
 
-def flatten_errors(errors, *, loc=None):
+def flatten_errors(
+    errors: Sequence[Any], *, loc: Optional[Tuple[str, ...]] = None
+) -> Generator[Dict[str, Any], None, None]:
     for error in errors:
         if isinstance(error, ErrorWrapper):
             if isinstance(error.exc, ValidationError):
-                yield from flatten_errors(error.exc.raw_errors, loc=error.loc)
+                if loc is not None:
+                    error_loc = loc + error.loc
+                else:
+                    error_loc = error.loc
+                yield from flatten_errors(error.exc.raw_errors, loc=error_loc)
             else:
                 yield error.dict(loc_prefix=loc)
         elif isinstance(error, list):
@@ -100,8 +104,7 @@ def flatten_errors(errors, *, loc=None):
 
 
 @lru_cache()
-def get_exc_type(exc: Exception) -> str:
-    cls = type(exc)
+def get_exc_type(cls: Type[Exception]) -> str:
 
     base_name = 'type_error' if issubclass(cls, TypeError) else 'value_error'
     if cls in (TypeError, ValueError):

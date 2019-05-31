@@ -1,17 +1,32 @@
 import datetime
 from decimal import Decimal
 from enum import Enum
+from ipaddress import IPv4Address, IPv4Interface, IPv4Network, IPv6Address, IPv6Interface, IPv6Network
+from pathlib import Path
 from types import GeneratorType
+from typing import Any, Callable, Dict, Type, Union
 from uuid import UUID
+
+from pydantic.color import Color
+from pydantic.types import SecretBytes, SecretStr
 
 __all__ = 'pydantic_encoder', 'custom_pydantic_encoder', 'timedelta_isoformat'
 
 
-def isoformat(o):
+def isoformat(o: Union[datetime.date, datetime.time]) -> str:
     return o.isoformat()
 
 
-ENCODERS_BY_TYPE = {
+ENCODERS_BY_TYPE: Dict[Type[Any], Callable[[Any], Any]] = {
+    Color: str,
+    IPv4Address: str,
+    IPv6Address: str,
+    IPv4Interface: str,
+    IPv6Interface: str,
+    IPv4Network: str,
+    IPv6Network: str,
+    SecretStr: lambda ss: ss.display(),
+    SecretBytes: lambda sb: sb.display(),
     UUID: str,
     datetime.datetime: isoformat,
     datetime.date: isoformat,
@@ -25,12 +40,15 @@ ENCODERS_BY_TYPE = {
 }
 
 
-def pydantic_encoder(obj):
+def pydantic_encoder(obj: Any) -> Any:
     from .main import BaseModel
+
     if isinstance(obj, BaseModel):
         return obj.dict()
     elif isinstance(obj, Enum):
         return obj.value
+    elif isinstance(obj, Path):
+        return str(obj)
 
     try:
         encoder = ENCODERS_BY_TYPE[type(obj)]
@@ -40,7 +58,7 @@ def pydantic_encoder(obj):
         return encoder(obj)
 
 
-def custom_pydantic_encoder(type_encoders, obj):
+def custom_pydantic_encoder(type_encoders: Dict[Any, Callable[[Type[Any]], Any]], obj: Any) -> Any:
     encoder = type_encoders.get(type(obj))
     if encoder:
         return encoder(obj)

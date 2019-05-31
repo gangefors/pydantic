@@ -1,15 +1,15 @@
 from decimal import Decimal
 from pathlib import Path
-from typing import Union
+from typing import Any, Union
 
-from .utils import display_as_type
+from .utils import AnyType, display_as_type
 
 
 class PydanticErrorMixin:
     code: str
     msg_template: str
 
-    def __init__(self, **ctx) -> None:
+    def __init__(self, **ctx: Any) -> None:
         self.ctx = ctx or None
         super().__init__()
 
@@ -39,7 +39,17 @@ class ExtraError(PydanticValueError):
 
 class NoneIsNotAllowedError(PydanticTypeError):
     code = 'none.not_allowed'
-    msg_template = 'none is not an allow value'
+    msg_template = 'none is not an allowed value'
+
+
+class NoneIsAllowedError(PydanticTypeError):
+    code = 'none.allowed'
+    msg_template = 'value is not none'
+
+
+class WrongConstantError(PydanticValueError):
+    code = 'const'
+    msg_template = 'expected constant value {const!r}'
 
 
 class BytesError(PydanticTypeError):
@@ -109,7 +119,11 @@ class PathNotADirectoryError(_PathValueError):
 
 
 class PyObjectError(PydanticTypeError):
-    msg_template = 'ensure this value contains valid import path'
+    msg_template = 'ensure this value contains valid import path or valid callable: {error_message}'
+
+
+class SequenceError(PydanticTypeError):
+    msg_template = 'value is not a valid sequence'
 
 
 class ListError(PydanticTypeError):
@@ -185,6 +199,14 @@ class NumberNotLeError(_NumberBoundError):
     msg_template = 'ensure this value is less than or equal to {limit_value}'
 
 
+class NumberNotMultipleError(PydanticValueError):
+    code = 'number.not_multiple'
+    msg_template = 'ensure this value is a multiple of {multiple_of}'
+
+    def __init__(self, *, multiple_of: Union[int, float, Decimal]) -> None:
+        super().__init__(multiple_of=multiple_of)
+
+
 class DecimalError(PydanticTypeError):
     msg_template = 'value is not a valid decimal'
 
@@ -250,7 +272,7 @@ class ArbitraryTypeError(PydanticTypeError):
     code = 'arbitrary_type'
     msg_template = 'instance of {expected_arbitrary_type} expected'
 
-    def __init__(self, *, expected_arbitrary_type) -> None:
+    def __init__(self, *, expected_arbitrary_type: AnyType) -> None:
         super().__init__(expected_arbitrary_type=display_as_type(expected_arbitrary_type))
 
 
@@ -261,3 +283,57 @@ class JsonError(PydanticValueError):
 class JsonTypeError(PydanticTypeError):
     code = 'json'
     msg_template = 'JSON object must be str, bytes or bytearray'
+
+
+class PatternError(PydanticValueError):
+    code = 'regex_pattern'
+    msg_template = 'Invalid regular expression'
+
+
+class DataclassTypeError(PydanticTypeError):
+    code = 'dataclass'
+    msg_template = 'instance of {class_name}, tuple or dict expected'
+
+
+class CallableError(PydanticTypeError):
+    msg_template = '{value} is not callable'
+
+
+class IPvAnyAddressError(PydanticValueError):
+    msg_template = 'value is not a valid IPv4 or IPv6 address'
+
+
+class IPvAnyInterfaceError(PydanticValueError):
+    msg_template = 'value is not a valid IPv4 or IPv6 interface'
+
+
+class IPvAnyNetworkError(PydanticValueError):
+    msg_template = 'value is not a valid IPv4 or IPv6 network'
+
+
+class IPv4AddressError(PydanticValueError):
+    msg_template = 'value is not a valid IPv4 address'
+
+
+class IPv6AddressError(PydanticValueError):
+    msg_template = 'value is not a valid IPv6 address'
+
+
+class IPv4NetworkError(PydanticValueError):
+    msg_template = 'value is not a valid IPv4 network'
+
+
+class IPv6NetworkError(PydanticValueError):
+    msg_template = 'value is not a valid IPv6 network'
+
+
+class IPv4InterfaceError(PydanticValueError):
+    msg_template = 'value is not a valid IPv4 interface'
+
+
+class IPv6InterfaceError(PydanticValueError):
+    msg_template = 'value is not a valid IPv6 interface'
+
+
+class ColorError(PydanticValueError):
+    msg_template = 'value is not a valid color: {reason}'

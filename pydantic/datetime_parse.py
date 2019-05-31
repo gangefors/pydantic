@@ -16,7 +16,7 @@ Changed to:
 """
 import re
 from datetime import date, datetime, time, timedelta, timezone
-from typing import Union
+from typing import Dict, Union, cast
 
 from . import errors
 from .utils import change_exception
@@ -24,8 +24,7 @@ from .utils import change_exception
 date_re = re.compile(r'(?P<year>\d{4})-(?P<month>\d{1,2})-(?P<day>\d{1,2})$')
 
 time_re = re.compile(
-    r'(?P<hour>\d{1,2}):(?P<minute>\d{1,2})'
-    r'(?::(?P<second>\d{1,2})(?:\.(?P<microsecond>\d{1,6})\d{0,6})?)?'
+    r'(?P<hour>\d{1,2}):(?P<minute>\d{1,2})' r'(?::(?P<second>\d{1,2})(?:\.(?P<microsecond>\d{1,6})\d{0,6})?)?'
 )
 
 datetime_re = re.compile(
@@ -59,24 +58,25 @@ iso8601_duration_re = re.compile(
 )
 
 EPOCH = datetime(1970, 1, 1)
-MS_WATERSHED = int(1e11)  # if greater than this, the number is in ms (in seconds this is 3rd March 5138)
+# if greater than this, the number is in ms, if less than or equal it's in seconds
+# (in seconds this is 11th October 2603, in ms it's 20th August 1970)
+MS_WATERSHED = int(2e10)
 StrIntFloat = Union[str, int, float]
 
 
-def get_numeric(value: StrIntFloat):
+def get_numeric(value: StrIntFloat) -> Union[None, int, float]:
     if isinstance(value, (int, float)):
         return value
     try:
         return int(value)
     except ValueError:
-        pass
-    try:
-        return float(value)
-    except ValueError:
-        pass
+        try:
+            return float(value)
+        except ValueError:
+            return None
 
 
-def from_unix_seconds(seconds: int) -> datetime:
+def from_unix_seconds(seconds: float) -> datetime:
     while seconds > MS_WATERSHED:
         seconds /= 1000
     dt = EPOCH + timedelta(seconds=seconds)
@@ -91,13 +91,16 @@ def parse_date(value: Union[date, StrIntFloat]) -> date:
     Raise ValueError if the input isn't well formatted.
     """
     if isinstance(value, date):
-        return value
+        if isinstance(value, datetime):
+            return value.date()
+        else:
+            return value
 
     number = get_numeric(value)
     if number is not None:
         return from_unix_seconds(number).date()
 
-    match = date_re.match(value)
+    match = date_re.match(cast(str, value))
     if not match:
         raise errors.DateError()
 
@@ -127,10 +130,10 @@ def parse_time(value: Union[time, str]) -> time:
     if kw['microsecond']:
         kw['microsecond'] = kw['microsecond'].ljust(6, '0')
 
-    kw = {k: int(v) for k, v in kw.items() if v is not None}
+    kw_ = {k: int(v) for k, v in kw.items() if v is not None}
 
     with change_exception(errors.TimeError, ValueError):
-        return time(**kw)
+        return time(**kw_)  # type: ignore
 
 
 def parse_datetime(value: Union[datetime, StrIntFloat]) -> datetime:
@@ -150,7 +153,7 @@ def parse_datetime(value: Union[datetime, StrIntFloat]) -> datetime:
     if number is not None:
         return from_unix_seconds(number)
 
-    match = datetime_re.match(value)
+    match = datetime_re.match(cast(str, value))
     if not match:
         raise errors.DateTimeError()
 
@@ -158,21 +161,23 @@ def parse_datetime(value: Union[datetime, StrIntFloat]) -> datetime:
     if kw['microsecond']:
         kw['microsecond'] = kw['microsecond'].ljust(6, '0')
 
-    tzinfo = kw.pop('tzinfo')
-    if tzinfo == 'Z':
+    tzinfo_str = kw.pop('tzinfo')
+    if tzinfo_str == 'Z':
         tzinfo = timezone.utc
-    elif tzinfo is not None:
-        offset_mins = int(tzinfo[-2:]) if len(tzinfo) > 3 else 0
-        offset = 60 * int(tzinfo[1:3]) + offset_mins
-        if tzinfo[0] == '-':
+    elif tzinfo_str is not None:
+        offset_mins = int(tzinfo_str[-2:]) if len(tzinfo_str) > 3 else 0
+        offset = 60 * int(tzinfo_str[1:3]) + offset_mins
+        if tzinfo_str[0] == '-':
             offset = -offset
         tzinfo = timezone(timedelta(minutes=offset))
+    else:
+        tzinfo = None
 
-    kw = {k: int(v) for k, v in kw.items() if v is not None}
-    kw['tzinfo'] = tzinfo
+    kw_: Dict[str, Union[int, timezone]] = {k: int(v) for k, v in kw.items() if v is not None}
+    kw_['tzinfo'] = tzinfo
 
     with change_exception(errors.DateTimeError, ValueError):
-        return datetime(**kw)
+        return datetime(**kw_)  # type: ignore
 
 
 def parse_duration(value: StrIntFloat) -> timedelta:
@@ -202,6 +207,6 @@ def parse_duration(value: StrIntFloat) -> timedelta:
     if kw.get('seconds') and kw.get('microseconds') and kw['seconds'].startswith('-'):
         kw['microseconds'] = '-' + kw['microseconds']
 
-    kw = {k: float(v) for k, v in kw.items() if v is not None}
+    kw_ = {k: float(v) for k, v in kw.items() if v is not None}
 
-    return sign * timedelta(**kw)
+    return sign * timedelta(**kw_)  # type: ignore

@@ -1,13 +1,18 @@
 import datetime
 import json
+import sys
 from decimal import Decimal
 from enum import Enum
+from ipaddress import IPv4Address, IPv4Interface, IPv4Network, IPv6Address, IPv6Interface, IPv6Network
+from pathlib import Path
 from uuid import UUID
 
 import pytest
 
 from pydantic import BaseModel, create_model
+from pydantic.color import Color
 from pydantic.json import pydantic_encoder, timedelta_isoformat
+from pydantic.types import DirectoryPath, FilePath, SecretBytes, SecretStr
 
 
 class MyEnum(Enum):
@@ -15,23 +20,55 @@ class MyEnum(Enum):
     snap = 'crackle'
 
 
-@pytest.mark.parametrize('input,output', [
-    (UUID('ebcdab58-6eb8-46fb-a190-d07a33e9eac8'), '"ebcdab58-6eb8-46fb-a190-d07a33e9eac8"'),
-    (datetime.datetime(2032, 1, 1, 1, 1), '"2032-01-01T01:01:00"'),
-    (datetime.datetime(2032, 1, 1, 1, 1, tzinfo=datetime.timezone.utc), '"2032-01-01T01:01:00+00:00"'),
-    (datetime.datetime(2032, 1, 1), '"2032-01-01T00:00:00"'),
-    (datetime.time(12, 34, 56), '"12:34:56"'),
-    (datetime.timedelta(days=12, seconds=34, microseconds=56), '1036834.000056'),
-    ({1, 2, 3}, '[1, 2, 3]'),
-    (frozenset([1, 2, 3]), '[1, 2, 3]'),
-    ((v for v in range(4)), '[0, 1, 2, 3]'),
-    (b'this is bytes', '"this is bytes"'),
-    (Decimal('12.34'), '12.34'),
-    (create_model('BarModel', a='b', c='d')(), '{"a": "b", "c": "d"}'),
-    (MyEnum.foo, '"bar"'),
-])
+@pytest.mark.parametrize(
+    'input,output',
+    [
+        (UUID('ebcdab58-6eb8-46fb-a190-d07a33e9eac8'), '"ebcdab58-6eb8-46fb-a190-d07a33e9eac8"'),
+        (IPv4Address('192.168.0.1'), '"192.168.0.1"'),
+        (Color('#000'), '"black"'),
+        (Color((1, 12, 123)), '"#010c7b"'),
+        (SecretStr('abcd'), '"**********"'),
+        (SecretStr(''), '""'),
+        (SecretBytes(b'xyz'), '"**********"'),
+        (SecretBytes(b''), '""'),
+        (IPv6Address('::1:0:1'), '"::1:0:1"'),
+        (IPv4Interface('192.168.0.0/24'), '"192.168.0.0/24"'),
+        (IPv6Interface('2001:db00::/120'), '"2001:db00::/120"'),
+        (IPv4Network('192.168.0.0/24'), '"192.168.0.0/24"'),
+        (IPv6Network('2001:db00::/120'), '"2001:db00::/120"'),
+        (datetime.datetime(2032, 1, 1, 1, 1), '"2032-01-01T01:01:00"'),
+        (datetime.datetime(2032, 1, 1, 1, 1, tzinfo=datetime.timezone.utc), '"2032-01-01T01:01:00+00:00"'),
+        (datetime.datetime(2032, 1, 1), '"2032-01-01T00:00:00"'),
+        (datetime.time(12, 34, 56), '"12:34:56"'),
+        (datetime.timedelta(days=12, seconds=34, microseconds=56), '1036834.000056'),
+        ({1, 2, 3}, '[1, 2, 3]'),
+        (frozenset([1, 2, 3]), '[1, 2, 3]'),
+        ((v for v in range(4)), '[0, 1, 2, 3]'),
+        (b'this is bytes', '"this is bytes"'),
+        (Decimal('12.34'), '12.34'),
+        (create_model('BarModel', a='b', c='d')(), '{"a": "b", "c": "d"}'),
+        (MyEnum.foo, '"bar"'),
+    ],
+)
 def test_encoding(input, output):
     assert output == json.dumps(input, default=pydantic_encoder)
+
+
+@pytest.mark.skipif(sys.platform.startswith('win'), reason='paths look different on windows')
+def test_path_encoding(tmpdir):
+    class PathModel(BaseModel):
+        path: Path
+        file_path: FilePath
+        dir_path: DirectoryPath
+
+    tmpdir = Path(tmpdir)
+    file_path = tmpdir / 'bar'
+    file_path.touch()
+    dir_path = tmpdir / 'baz'
+    dir_path.mkdir()
+    model = PathModel(path=Path('/path/test/example/'), file_path=file_path, dir_path=dir_path)
+    expected = '{{"path": "/path/test/example", "file_path": "{}", "dir_path": "{}"}}'.format(file_path, dir_path)
+    assert json.dumps(model, default=pydantic_encoder) == expected
 
 
 def test_model_encoding():
@@ -59,10 +96,13 @@ def test_invalid_model():
         json.dumps(Foo, default=pydantic_encoder)
 
 
-@pytest.mark.parametrize('input,output', [
-    (datetime.timedelta(days=12, seconds=34, microseconds=56), 'P12DT0H0M34.000056S'),
-    (datetime.timedelta(days=1001, hours=1, minutes=2, seconds=3, microseconds=654321), 'P1001DT1H2M3.654321S'),
-])
+@pytest.mark.parametrize(
+    'input,output',
+    [
+        (datetime.timedelta(days=12, seconds=34, microseconds=56), 'P12DT0H0M34.000056S'),
+        (datetime.timedelta(days=1001, hours=1, minutes=2, seconds=3, microseconds=654_321), 'P1001DT1H2M3.654321S'),
+    ],
+)
 def test_iso_timedelta(input, output):
     assert output == timedelta_isoformat(input)
 

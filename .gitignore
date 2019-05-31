@@ -1,5 +1,7 @@
 .idea/
 env/
+env36/
+env37/
 *.py[cod]
 *.egg-info/
 build/
@@ -12,6 +14,10 @@ htmlcov/
 benchmarks/*.json
 docs/_build/
 docs/.TMP_HISTORY.rst
+docs/.tmp_schema_mappings.rst
 .pytest_cache/
 .vscode/
 _build/
+pydantic/*.c
+pydantic/*.so
+.auto-format
